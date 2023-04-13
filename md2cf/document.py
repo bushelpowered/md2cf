@@ -3,10 +3,14 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import uuid
 import chardet
 import mistune
 import yaml
 from yaml.parser import ParserError
+import json
+import base64
+import zlib
 
 from md2cf.confluence_renderer import ConfluenceRenderer, RelativeLink
 from md2cf.ignored_files import GitRepository
@@ -118,6 +122,9 @@ def get_pages_from_directory(
     for current_path, directories, file_names in os.walk(file_path):
         current_path = Path(current_path).resolve()
 
+        if ".git" in current_path.parts:
+            continue
+
         markdown_files = [
             Path(current_path, file_name)
             for file_name in file_names
@@ -171,11 +178,12 @@ def get_pages_from_directory(
                             "title"
                         ]
                 parent_page_title = folder_data[current_path]["title"]
+                children_macro_uuid = uuid.uuid4()
                 processed_pages.append(
                     Page(
                         title=parent_page_title,
                         parent_title=folder_parent_title,
-                        body="",
+                        body=f"<ac:structured-macro ac:name=\"children\" ac:schema-version=\"2\" data-layout=\"default\" ac:local-id=\"{children_macro_uuid}\" ac:macro-id=\"{children_macro_uuid}\" />",
                     )
                 )
 
@@ -216,6 +224,7 @@ def get_page_data_from_file_path(
         with open(file_path, encoding=detected_encoding["encoding"]) as file_handle:
             markdown_lines = file_handle.readlines()
 
+    markdown_lines = convert_mermaid_graphs_to_images(markdown_lines)
     page = get_page_data_from_lines(
         markdown_lines,
         strip_header=strip_header,
@@ -229,6 +238,42 @@ def get_page_data_from_file_path(
     page.file_path = file_path
 
     return page
+
+def convert_mermaid_graphs_to_images(lines: List[str]):
+    result = []
+    graph = None
+    for line in lines:
+        if line.startswith("```mermaid"):
+            graph = []
+        elif graph != None:
+            if line.startswith("```"):
+                result.append(mermaid_graph_to_image_url(graph))
+                graph = None
+            else:
+                graph.append(line)
+        else: 
+            result.append(line)
+    if graph:
+        result.append(mermaid_graph_to_image_url(graph))
+    return result
+
+
+def mermaid_graph_to_image_url(graph: List[str], hostname: str = "https://mermaid.ink"):
+    obj = {
+        "code": "\n".join(graph),
+        "mermaid": json.dumps({
+            "theme": "light",
+        }),
+        "autoSync": True,
+        "updateDiagram": False,
+        "updateEditor": True,
+        "panZoom": False,
+        "editorMode": "code"
+    }
+
+    encoded_graph = base64.urlsafe_b64encode(zlib.compress(bytes(json.dumps(obj), "utf-8"))).decode("utf-8")
+    url = f"{hostname}/img/pako:{encoded_graph}?type=png"
+    return f"![]({url})"
 
 
 def get_page_data_from_lines(
